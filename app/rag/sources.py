@@ -45,8 +45,8 @@ RAG_SOURCES = [
     # Filing addresses (на практике иногда отдельные страницы/разделы внутри формы)
     {
         "kind": "filing",
-        "title": "USCIS Direct Filing Addresses (Forms)",
-        "url": "https://www.uscis.gov/forms/direct-filing-addresses",
+        "title": "Direct Filing Addresses for Form I-140",
+        "url": "https://www.uscis.gov/i-140-addresses",
     },
 
     # CFR (если будешь подтягивать с eCFR — удобно для точных цитат)

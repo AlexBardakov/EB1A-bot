@@ -66,7 +66,8 @@ class ChatState(Base):
     chat_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     active_case_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cases.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                                                 nullable=False)
 
     active_case: Mapped[Optional["Case"]] = relationship("Case")
 
@@ -81,7 +82,8 @@ class Case(Base):
     lock_mode: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                                                 nullable=False)
 
     evidence_items: Mapped[List["EvidenceItem"]] = relationship(back_populates="case", cascade="all, delete-orphan")
     documents: Mapped[List["Document"]] = relationship(back_populates="case", cascade="all, delete-orphan")
@@ -113,7 +115,8 @@ class EvidenceItem(Base):
     file_ids: Mapped[List[int]] = mapped_column(JSON, default=list, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                                                 nullable=False)
 
     case: Mapped["Case"] = relationship(back_populates="evidence_items")
 
@@ -135,15 +138,22 @@ class Document(Base):
     current_version_id: Mapped[Optional[int]] = mapped_column(ForeignKey("document_versions.id"), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                                                 nullable=False)
 
     case: Mapped["Case"] = relationship(back_populates="documents")
+
+    # --- ИСПРАВЛЕНИЕ: Явное указание foreign_keys для списка версий ---
     versions: Mapped[List["DocumentVersion"]] = relationship(
+        "DocumentVersion",
         back_populates="document",
         cascade="all, delete-orphan",
-        foreign_keys="DocumentVersion.document_id",
+        foreign_keys="[DocumentVersion.document_id]",
     )
+
+    # --- ИСПРАВЛЕНИЕ: Явное указание foreign_keys для текущей версии ---
     current_version: Mapped[Optional["DocumentVersion"]] = relationship(
+        "DocumentVersion",
         foreign_keys=[current_version_id],
         post_update=True,
     )
@@ -169,7 +179,12 @@ class DocumentVersion(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
-    document: Mapped["Document"] = relationship(back_populates="versions")
+    # --- ИСПРАВЛЕНИЕ: Явное указание foreign_keys для ссылки на родительский документ ---
+    document: Mapped["Document"] = relationship(
+        "Document",
+        back_populates="versions",
+        foreign_keys=[document_id]
+    )
 
 
 class Checkpoint(Base):

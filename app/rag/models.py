@@ -12,6 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.storage.models import Base
 
 # pgvector SQLAlchemy type
+# Убедитесь, что установлен пакет: pip install pgvector
 from pgvector.sqlalchemy import Vector
 
 
@@ -42,7 +43,7 @@ class RagChunk(Base):
     # Track source update time if known (parsed or manually set)
     source_last_updated: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-    # Embedding vector (dim depends on model you use; set to 1536/3072/etc.)
+    # Embedding vector (dim=1536 for OpenAI text-embedding-3-small)
     embedding: Mapped[list] = mapped_column(Vector(1536))
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
