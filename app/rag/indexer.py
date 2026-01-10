@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import re
+import os
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, List, Optional, Dict, Any
+from typing import List, Optional
 
 import requests
 from bs4 import BeautifulSoup
+from openai import OpenAI  # Требуется: pip install openai
 
 from sqlalchemy.orm import Session
-
 from app.rag.models import RagChunk
 
 
@@ -31,39 +32,43 @@ def _normalize_whitespace(s: str) -> str:
 
 
 def fetch_page(url: str, title_fallback: str = "") -> FetchedPage:
-    r = requests.get(url, timeout=40, headers={"User-Agent": "eb1a-bot/1.0"})
+    # Имитируем браузер, чтобы USCIS не блокировал запрос
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    r = requests.get(url, timeout=40, headers=headers)
     r.raise_for_status()
     html = r.text
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Remove obvious nav/script/style
-    for tag in soup(["script", "style", "noscript", "header", "footer"]):
+    # Удаляем лишнее
+    for tag in soup(
+            ["script", "style", "noscript", "header", "footer", "nav"]):
         tag.decompose()
 
-    title = (soup.title.get_text(strip=True) if soup.title else title_fallback).strip()
+    title = (soup.title.get_text(
+        strip=True) if soup.title else title_fallback).strip()
 
-    # Extract text (simple approach; you can improve per-site later)
+    # Извлекаем текст
     text = soup.get_text("\n", strip=True)
     text = _normalize_whitespace(text)
 
     raw_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    # Optional: try to parse "Last Reviewed/Updated" if present (site-specific; can be enhanced)
-    last_updated = None
-
     return FetchedPage(
         url=url,
         title=title or title_fallback,
         text=text,
-        last_updated=last_updated,
+        last_updated=None,
         raw_hash=raw_hash,
     )
 
 
-def chunk_text(text: str, *, max_chars: int = 2500, overlap_chars: int = 250) -> List[str]:
+def chunk_text(text: str, *, max_chars: int = 2000,
+               overlap_chars: int = 200) -> List[str]:
     """
-    Simple chunker by paragraphs. Good enough to start.
+    Разбиваем текст на куски. 2000 символов ~ 400-500 токенов, идеально для RAG.
     """
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: List[str] = []
@@ -80,15 +85,13 @@ def chunk_text(text: str, *, max_chars: int = 2500, overlap_chars: int = 250) ->
             buf = (buf + "\n\n" + p).strip()
         else:
             flush()
-            # if paragraph itself is too big, split hard
             while len(p) > max_chars:
                 chunks.append(p[:max_chars].strip())
-                p = p[max_chars - overlap_chars :]
+                p = p[max_chars - overlap_chars:]
             buf = p
-
     flush()
 
-    # add overlap between chunks (soft overlap)
+    # Добавляем перекрытие (overlap)
     if overlap_chars > 0 and len(chunks) > 1:
         overlapped = []
         prev_tail = ""
@@ -104,32 +107,42 @@ def chunk_text(text: str, *, max_chars: int = 2500, overlap_chars: int = 250) ->
     return chunks
 
 
-# ---- Embeddings stub ----
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """
-    Replace with OpenAI embeddings call.
-    Must return vectors of the same dimension as RagChunk.embedding (e.g., 1536).
+    Генерируем реальные векторы через OpenAI (text-embedding-3-small).
+    Размерность: 1536.
     """
-    # Placeholder: DO NOT use in production.
-    # Return deterministic pseudo-embeddings so pipeline works.
-    out = []
-    for t in texts:
-        h = hashlib.sha256(t.encode("utf-8")).digest()
-        vec = [(b - 128) / 128 for b in h[:1536]]  # not real; just shape-ish
-        # Ensure exact length 1536:
-        vec = (vec + [0.0] * 1536)[:1536]
-        out.append(vec)
-    return out
+    if not texts:
+        return []
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    # Заменяем переносы строк на пробелы для лучшего качества эмбеддингов
+    clean_texts = [t.replace("\n", " ") for t in texts]
+
+    try:
+        resp = client.embeddings.create(
+            input=clean_texts,
+            model="text-embedding-3-small"
+        )
+        return [d.embedding for d in resp.data]
+    except Exception as e:
+        print(f"[RAG Error] Embedding failed: {e}")
+        raise e
 
 
 def upsert_page_into_rag(
-    session: Session,
-    *,
-    kind: str,
-    page: FetchedPage,
-    chunk_prefix: str,
+        session: Session,
+        *,
+        kind: str,
+        page: FetchedPage,
+        chunk_prefix: str,
 ) -> int:
     chunks = chunk_text(page.text)
+
+    if not chunks:
+        return 0
+
     embeddings = embed_texts(chunks)
 
     upserted = 0
@@ -138,13 +151,14 @@ def upsert_page_into_rag(
 
         existing = (
             session.query(RagChunk)
-            .filter(RagChunk.source_url == page.url, RagChunk.chunk_id == chunk_id)
+            .filter(RagChunk.source_url == page.url,
+                    RagChunk.chunk_id == chunk_id)
             .one_or_none()
         )
 
         meta = {"raw_hash": page.raw_hash, "index": i}
         if existing:
-            # only update if text changed
+            # Обновляем, если хеш изменился
             if existing.meta_json.get("raw_hash") != page.raw_hash:
                 existing.text = chunk
                 existing.embedding = emb
