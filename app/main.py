@@ -1,85 +1,130 @@
 # app/main.py
-from dotenv import load_dotenv
-load_dotenv()  # Загрузит .env из корня проекта
-
-from __future__ import annotations
-
+import sys
 import os
-import requests
-from fastapi import FastAPI, Request
+import time
+import telebot
+from dotenv import load_dotenv
+
+# --- ИСПРАВЛЕНИЕ ПУТЕЙ ---
+# Добавляем корневую папку проекта в sys.path, чтобы Python видел модуль 'app'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(current_dir)
+if root_dir not in sys.path:
+    sys.path.append(root_dir)
+# -------------------------
+
+# Теперь импорты будут работать
 from app.storage.db import db_session
 from app.telegram.commands import set_active_case, cmd_review_document
-from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
-    cmd_premium
+from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, cmd_premium
 
-app = FastAPI()
+load_dotenv()
 
+# Инициализация бота
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    print("Error: TELEGRAM_BOT_TOKEN not found in .env")
+    sys.exit(1)
+
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+print("--- EB-1A Bot (Polling Mode) Started ---")
 
 
-def send_telegram_message(chat_id: str, text: str):
-    if not TELEGRAM_BOT_TOKEN:
-        print("[WARN] TELEGRAM_BOT_TOKEN not set, cannot send message.")
+# --- Обработчики команд ---
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    welcome_text = (
+        "Привет! Я AI-ассистент по EB-1A.\n\n"
+        "**Команды управления:**\n"
+        "`/case use <Name>` - Выбрать активный кейс (из cases.json)\n"
+        "`/review <DocTitle>` - Проверить документ\n\n"
+        "**Справочные команды (RAG):**\n"
+        "`/requirements` - Критерии EB-1A\n"
+        "`/fees` - Пошлины\n"
+        "`/filing` - Адреса подачи\n"
+        "`/premium` - Премиум процессинг"
+    )
+    bot.reply_to(message, welcome_text, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['requirements'])
+def handle_requirements(message):
+    bot.send_chat_action(message.chat.id, 'typing')
+    with db_session() as session:
+        resp = cmd_requirements(session, str(message.chat.id))
+        bot.reply_to(message, resp, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['fees'])
+def handle_fees(message):
+    bot.send_chat_action(message.chat.id, 'typing')
+    with db_session() as session:
+        resp = cmd_fees(session, str(message.chat.id))
+        bot.reply_to(message, resp, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['filing'])
+def handle_filing(message):
+    bot.send_chat_action(message.chat.id, 'typing')
+    with db_session() as session:
+        resp = cmd_filing(session, str(message.chat.id))
+        bot.reply_to(message, resp, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['premium'])
+def handle_premium(message):
+    bot.send_chat_action(message.chat.id, 'typing')
+    with db_session() as session:
+        resp = cmd_premium(session, str(message.chat.id))
+        bot.reply_to(message, resp, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['case'])
+def handle_case_use(message):
+    text = message.text.strip()
+    prefix = "/case use "
+    if not text.startswith(prefix):
+        bot.reply_to(message, "Формат: `/case use <Case Name>`\nПример: `/case use Owner Four Kings`",
+                     parse_mode="Markdown")
         return
+    case_name = text[len(prefix):].strip()
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"  # Или "HTML", если хотите форматирование
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"[ERROR] Failed to send Telegram message: {e}")
+    with db_session() as session:
+        resp = set_active_case(session, str(message.chat.id), case_name)
+        bot.reply_to(message, resp)
 
 
-@app.post("/telegram/webhook")
-async def telegram_webhook(req: Request):
-    payload = await req.json()
+@bot.message_handler(commands=['review'])
+def handle_review(message):
+    text = message.text.strip()
+    prefix = "/review "
+    if not text.startswith(prefix):
+        bot.reply_to(message, "Формат: `/review <Doc Title>`", parse_mode="Markdown")
+        return
+    doc_title = text[len(prefix):].strip()
 
-    # Простейший парсинг
-    message = payload.get("message") or {}
-    chat = message.get("chat") or {}
-    chat_id = str(chat.get("id") or "")
-    text = (message.get("text") or "").strip()
-
-    if not chat_id or not text:
-        return {"ok": True}
-
-    reply_text = "Я не знаю такой команды. Попробуйте /requirements или /case use."
+    bot.reply_to(message, f"🔍 Анализирую документ '{doc_title}'...")
+    bot.send_chat_action(message.chat.id, 'typing')
 
     try:
         with db_session() as session:
-            # --- Роутинг команд ---
-            if text.startswith("/case use "):
-                case_name = text.replace("/case use ", "", 1).strip()
-                reply_text = set_active_case(session, chat_id, case_name)
-
-            elif text.startswith("/review "):
-                doc_title = text.replace("/review ", "", 1).strip()
-                # Это долгая операция, в продакшене лучше делать через BackgroundTasks
-                reply_text = cmd_review_document(session, chat_id, doc_title)
-
-            elif text == "/requirements":
-                reply_text = cmd_requirements(session, chat_id)
-            elif text == "/fees":
-                reply_text = cmd_fees(session, chat_id)
-            elif text == "/filing":
-                reply_text = cmd_filing(session, chat_id)
-            elif text == "/premium":
-                reply_text = cmd_premium(session, chat_id)
-
-            # Если команда не распознана, логика "эхо" или помощь
+            resp = cmd_review_document(session, str(message.chat.id), doc_title)
+            # Разбиваем длинные сообщения (Telegram лимит 4096)
+            if len(resp) > 4000:
+                for x in range(0, len(resp), 4000):
+                    bot.send_message(message.chat.id, resp[x:x + 4000], parse_mode="Markdown")
             else:
-                pass
-
-                # Отправляем ответ
-        send_telegram_message(chat_id, reply_text)
-
+                bot.reply_to(message, resp, parse_mode="Markdown")
     except Exception as e:
-        error_msg = f"Произошла ошибка: {str(e)}"
-        print(error_msg)
-        send_telegram_message(chat_id, error_msg)
+        bot.reply_to(message, f"Ошибка: {e}")
 
-    return {"ok": True}
+
+if __name__ == "__main__":
+    while True:
+        try:
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except Exception as e:
+            print(f"Bot crashed: {e}")
+            time.sleep(5)

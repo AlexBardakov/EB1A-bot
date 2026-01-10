@@ -1,0 +1,32 @@
+[
+  {
+    "name": "first case name",
+    "memo": {
+      "role": "Founder & Owner",
+      "field": "Artisanal dairy production and product innovation",
+      "pillars": [
+        "Industry leader and strategic decision-maker",
+        "Creator of award-winning original products",
+        "Judge of professional competitions"
+      ],
+      "awards_summary": "20+ national/international awards (Gold medals, Grand Prix)",
+      "strategy": "Establish sustained acclaim; frame business success as evidence of leadership."
+    }
+  },
+  {
+    "name": "second case name",
+    "memo": {
+      "role": "Key Production Specialist",
+      "field": "Artisanal dairy production and product innovation",
+      "pillars": [
+        "Irreplaceable expert with rare skill combination (craft + engineering)",
+        "Critical role in production of award-winning cheeses",
+        "Judge of 'Best Cheese of Siberia'"
+      ],
+      "awards_summary": "Awards obtained during employment",
+      "strategy": "Prove non-replaceability; tie awards to individual contribution."
+    }
+  }
+]
+
+# delete this row ---- you can add cases just copying blocks
