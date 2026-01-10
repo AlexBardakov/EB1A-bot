@@ -5,20 +5,20 @@ import time
 import telebot
 from dotenv import load_dotenv
 
-# --- ИСПРАВЛЕНИЕ ПУТЕЙ ---
-# Добавляем корневую папку проекта в sys.path, чтобы Python видел модуль 'app'
+# 1. СНАЧАЛА настраиваем пути и загружаем .env
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
+
+# Загружаем .env ДО импортов из app, чтобы база получила правильный пароль
+load_dotenv(os.path.join(root_dir, '.env'))
+
 if root_dir not in sys.path:
     sys.path.append(root_dir)
-# -------------------------
 
-# Теперь импорты будут работать
+# 2. ТОЛЬКО ТЕПЕРЬ импортируем модули приложения
 from app.storage.db import db_session
 from app.telegram.commands import set_active_case, cmd_review_document
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, cmd_premium
-
-load_dotenv()
 
 # Инициализация бота
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
