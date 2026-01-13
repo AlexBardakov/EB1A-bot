@@ -1,8 +1,6 @@
 # app/core/ingest.py
 import os
-import uuid
 from datetime import datetime
-from typing import Optional
 
 # Библиотеки для текста
 import docx
@@ -11,7 +9,7 @@ from pypdf import PdfReader
 from sqlalchemy.orm import Session
 from app.storage.models import Document, DocumentVersion, DocumentStatus, ChatState
 
-# Папка для сохранения файлов (локально)
+# Папка для сохранения файлов (будет создана в корне проекта)
 UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -23,7 +21,9 @@ def extract_text_from_file(file_path: str, mime_type: str) -> str:
         if "pdf" in mime_type or file_path.endswith(".pdf"):
             reader = PdfReader(file_path)
             for page in reader.pages:
-                text += page.extract_text() + "\n"
+                t = page.extract_text()
+                if t:
+                    text += t + "\n"
 
         elif "word" in mime_type or "document" in mime_type or file_path.endswith(".docx"):
             doc = docx.Document(file_path)
@@ -47,10 +47,7 @@ def save_document_upload(
         mime_type: str
 ) -> str:
     """
-    1. Находит активный кейс.
-    2. Сохраняет файл на диск.
-    3. Парсит текст.
-    4. Создает запись в БД.
+    Сохраняет файл, парсит текст, создает/обновляет запись в БД.
     """
     # 1. Проверка кейса
     cs = session.query(ChatState).filter(ChatState.chat_id == chat_id).one_or_none()
@@ -58,8 +55,9 @@ def save_document_upload(
         return "⚠️ Сначала выберите кейс через `/case use ...`"
 
     # 2. Сохранение на диск
-    # Генерируем уникальное имя, чтобы не перезатереть файлы с одинаковым названием
-    unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file_name}"
+    # Добавляем timestamp, чтобы файлы физически не перезаписывались
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    unique_name = f"{timestamp}_{file_name}"
     file_path = os.path.join(UPLOAD_DIR, unique_name)
 
     with open(file_path, "wb") as f:
@@ -70,8 +68,8 @@ def save_document_upload(
     if not extracted_text:
         extracted_text = "[No text extracted or empty file]"
 
-    # 4. Запись в БД
-    # Проверяем, есть ли уже документ с таким названием в этом кейсе
+    # 4. Работа с БД
+    # Ищем документ по имени в текущем кейсе
     existing_doc = (
         session.query(Document)
         .filter(Document.case_id == cs.active_case_id, Document.title == file_name)
@@ -80,24 +78,27 @@ def save_document_upload(
 
     if existing_doc:
         doc = existing_doc
-        msg_prefix = f"🔄 Обновляю документ '{file_name}'..."
+        # Считаем текущие версии, чтобы показать красивый номер
+        ver_num = len(doc.versions) + 1
+        msg_prefix = f"🔄 Документ '{file_name}' найден. Добавляю новую версию (v{ver_num})..."
     else:
         doc = Document(
             case_id=cs.active_case_id,
             title=file_name,
-            doc_type="unknown",  # Можно потом уточнить
+            doc_type="unknown",
             status=DocumentStatus.draft
         )
         session.add(doc)
-        session.flush()  # чтобы получить doc.id
+        session.flush()  # Получаем ID
         msg_prefix = f"✅ Создан новый документ '{file_name}'."
 
-    # Создаем новую версию
+    # Создаем версию
     version = DocumentVersion(
         document_id=doc.id,
         storage_url=file_path,
         text_extract=extracted_text,
-        created_by=f"user_{chat_id}"
+        created_by=f"user_{chat_id}",
+        notes=f"Uploaded via Telegram at {timestamp}"
     )
     session.add(version)
     session.flush()
@@ -108,6 +109,6 @@ def save_document_upload(
 
     return (
         f"{msg_prefix}\n"
-        f"Распознано символов: {len(extracted_text)}\n"
-        f"Теперь можно отправить: `/review {file_name}`"
+        f"Символов распознано: {len(extracted_text)}\n"
+        f"Теперь можно проверить: `/review {file_name}`"
     )
