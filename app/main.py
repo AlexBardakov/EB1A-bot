@@ -19,6 +19,7 @@ if root_dir not in sys.path:
 from app.storage.db import db_session
 from app.telegram.commands import set_active_case, cmd_review_document
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, cmd_premium
+from app.core.ingest import save_document_upload
 
 # Инициализация бота
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -120,6 +121,31 @@ def handle_review(message):
     except Exception as e:
         bot.reply_to(message, f"Ошибка: {e}")
 
+
+@bot.message_handler(content_types=['document'])
+def handle_docs(message):
+    try:
+        chat_id = str(message.chat.id)
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        file_name = message.document.file_name
+        mime_type = message.document.mime_type or "application/octet-stream"
+
+        bot.reply_to(message, "📥 Принял файл. Обрабатываю...")
+
+        with db_session() as session:
+            result_text = save_document_upload(
+                session,
+                chat_id,
+                file_name,
+                downloaded_file,
+                mime_type
+            )
+            bot.reply_to(message, result_text, parse_mode="Markdown")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при загрузке: {e}")
 
 if __name__ == "__main__":
     while True:
