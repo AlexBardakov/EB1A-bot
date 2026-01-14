@@ -22,10 +22,16 @@ from app.telegram.commands import (
     cmd_add_manual_evidence,
     cmd_list_cases,
     get_all_cases,
-    get_evidence_tags,  # <-- NEW
-    get_evidence_by_tag  # <-- NEW
+    get_evidence_tags,
+    get_evidence_by_tag,
+    cmd_case_status,
+    get_all_documents,
+    cmd_link_evidence,
+    STANDARD_CRITERIA,  # <--- НОВЫЙ ИМПОРТ
+    cmd_delete_evidence_by_code  # <--- НОВЫЙ ИМПОРТ
 )
-from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, cmd_premium
+from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
+    cmd_premium
 from app.core.ingest import save_document_upload
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -42,252 +48,314 @@ print("--- EB-1A Bot (Polling Mode) Started ---")
 def send_welcome(message):
     help_text = (
         "🤖 **EB-1A Assistant Bot: Справка**\n\n"
-        "📁 **Управление кейсом**\n"
-        "`/cases` - Выбрать кейс (КНОПКИ)\n"
-        "`/case use <Name>` - Выбрать кейс (текстом)\n\n"
+        "📊 **Дашборд**\n"
+        "`/status` - Gap-анализ кейса (прогресс)\n\n"
 
-        "📄 **Документы**\n"
-        "`/docs` - Показать список документов\n"
-        "`/review <Title>` - Анализ документа (AI)\n"
-        "`/doc delete <Title>` - Удалить документ (безвозвратно)\n"
-        "*Загрузка:* Просто перетащите PDF/Word файл в чат.\n\n"
+        "🧩 **Доказательства (Факты)**\n"
+        "`/add_evidence` - Добавить факт (Мастер)\n"
+        "`/delete_evidence` - Удалить факт (Меню)\n"
+        "`/evidence` - Просмотр фактов по тегам\n"
+        "`/link` - Привязать Документ к Факту\n\n"
 
-        "🧩 **Доказательства и Факты**\n"
-        "`/evidence` - Показать факты по категориям (КНОПКИ)\n"
-        "`/add_evidence <Tag> <Text>` - Добавить факт вручную\n"
-        "_Пример:_ `/add_evidence Awards Золотая медаль 2023...`\n\n"
-
-        "📚 **Справочник (USCIS RAG)**\n"
-        "`/requirements` - Критерии EB-1A\n"
-        "`/fees` - Актуальные пошлины\n"
-        "`/filing` - Куда подавать (адреса)\n"
-        "`/premium` - Premium Processing (I-907)\n"
+        "📁 **Файлы и Кейс**\n"
+        "`/cases` - Выбрать кейс\n"
+        "`/docs` - Список документов\n"
+        "*Загрузка:* Просто перетащите файл в чат."
     )
     bot.reply_to(message, help_text, parse_mode="Markdown")
 
 
-# --- CASES (BUTTONS) ---
-@bot.message_handler(commands=['cases'])
-def handle_list_cases_buttons(message):
+# --- ADD EVIDENCE WIZARD ---
+@bot.message_handler(commands=['add_evidence'])
+def handle_add_evidence_wizard(message):
+    """Шаг 1: Показываем кнопки с категориями."""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    for tag, desc_str in STANDARD_CRITERIA.items():
+        # desc_str выглядит как "🏆 Награды (Prizes)"
+        # callback_data: "add_ev_cat:Awards"
+        buttons.append(types.InlineKeyboardButton(text=desc_str,
+                                                  callback_data=f"add_ev_cat:{tag}"))
+
+    markup.add(*buttons)
+    bot.send_message(message.chat.id, "🧩 Выберите категорию для нового факта:",
+                     reply_markup=markup)
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('add_ev_cat:'))
+def callback_add_evidence_cat(call):
+    """Шаг 2: Категория выбрана, просим текст."""
+    tag = call.data.split(':', 1)[1]
+
+    msg = bot.edit_message_text(
+        f"📝 Выбрана категория: **{STANDARD_CRITERIA.get(tag, tag)}**\n\n"
+        f"Напишите текст доказательства в ответ на это сообщение (одним сообщением):",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="Markdown"
+    )
+
+    # Регистрируем следующий шаг - ожидание текста
+    bot.register_next_step_handler(msg, process_evidence_text, tag)
+
+
+def process_evidence_text(message, tag):
+    """Шаг 3: Получаем текст и сохраняем."""
+    chat_id = str(message.chat.id)
+    description = message.text.strip()
+
+    if not description:
+        bot.send_message(chat_id,
+                         "❌ Текст не может быть пустым. Попробуйте `/add_evidence` снова.")
+        return
+
     with db_session() as session:
-        cases = get_all_cases(session)
-        if not cases:
-            bot.reply_to(message, "📭 База пуста. Запустите `seed_cases.py`.")
-            return
-
-        markup = types.InlineKeyboardMarkup()
-        for c in cases:
-            # callback_data limit 64 bytes
-            btn = types.InlineKeyboardButton(text=f"📂 {c.name}", callback_data=f"set_case:{c.name}")
-            markup.add(btn)
-
-        bot.send_message(message.chat.id, "Выберите активный кейс:", reply_markup=markup)
+        resp = cmd_add_manual_evidence(session, chat_id, tag, description)
+        bot.send_message(chat_id, resp, parse_mode="Markdown")
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('set_case:'))
-def callback_set_case(call):
-    case_name = call.data.split(':', 1)[1]
-    chat_id = str(call.message.chat.id)
-    with db_session() as session:
-        resp = set_active_case(session, chat_id, case_name)
-        bot.answer_callback_query(call.id, "Кейс выбран!")
-        bot.edit_message_text(f"✅ {resp}", chat_id, call.message.message_id, parse_mode="Markdown")
-
-
-# --- EVIDENCE (BUTTONS) ---
-@bot.message_handler(commands=['evidence'])
-def handle_evidence_buttons(message):
+# --- DELETE EVIDENCE MENU ---
+@bot.message_handler(commands=['delete_evidence'])
+def handle_delete_evidence_menu(message):
+    """Шаг 1: Показываем категории, где есть факты."""
     chat_id = str(message.chat.id)
     with db_session() as session:
         tags = get_evidence_tags(session, chat_id)
-
         if not tags:
-            bot.reply_to(message, "📭 В этом кейсе пока нет доказательств.\nДобавьте их через `/add_evidence`.")
+            bot.reply_to(message, "📭 Фактов для удаления нет.")
             return
 
         markup = types.InlineKeyboardMarkup()
         for tag in tags:
-            # callback_data format: "view_ev:<Tag>"
-            btn = types.InlineKeyboardButton(text=f"🏷 {tag}", callback_data=f"view_ev:{tag}")
+            btn = types.InlineKeyboardButton(text=f"🗑 {tag}",
+                                             callback_data=f"del_ev_tag:{tag}")
             markup.add(btn)
 
-        bot.send_message(chat_id, "Выберите категорию доказательств:", reply_markup=markup)
+        bot.send_message(chat_id,
+                         "Выберите категорию, из которой удалить факт:",
+                         reply_markup=markup)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('view_ev:'))
-def callback_view_evidence(call):
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('del_ev_tag:'))
+def callback_del_ev_tag(call):
+    """Шаг 2: Показываем список фактов в категории."""
     tag = call.data.split(':', 1)[1]
     chat_id = str(call.message.chat.id)
 
     with db_session() as session:
         items = get_evidence_by_tag(session, chat_id, tag)
+        if not items:
+            bot.answer_callback_query(call.id, "В этой категории пусто.")
+            return
 
-        # Формируем красивый список
-        lines = [f"🏷 **Категория: {tag}** (Всего: {len(items)})", ""]
+        markup = types.InlineKeyboardMarkup()
+        for item in items:
+            # callback_data: "del_ev_do:MAN-1"
+            label = f"❌ {item.exhibit_code}: {item.description[:20]}..."
+            btn = types.InlineKeyboardButton(text=label,
+                                             callback_data=f"del_ev_do:{item.exhibit_code}")
+            markup.add(btn)
+
+        # Кнопка назад
+        markup.add(types.InlineKeyboardButton("🔙 Отмена",
+                                              callback_data="cancel_action"))
+
+        bot.edit_message_text(f"Выберите факт для УДАЛЕНИЯ из **{tag}**:",
+                              chat_id, call.message.message_id,
+                              reply_markup=markup, parse_mode="Markdown")
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('del_ev_do:'))
+def callback_del_ev_perform(call):
+    """Шаг 3: Удаляем."""
+    ev_code = call.data.split(':', 1)[1]
+    chat_id = str(call.message.chat.id)
+
+    with db_session() as session:
+        resp = cmd_delete_evidence_by_code(session, chat_id, ev_code)
+        bot.answer_callback_query(call.id, "Удалено!")
+        bot.edit_message_text(resp, chat_id, call.message.message_id,
+                              parse_mode="Markdown")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cancel_action")
+def callback_cancel(call):
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+
+
+# --- LINKING FLOW ---
+@bot.message_handler(commands=['link'])
+def handle_link_start(message):
+    chat_id = str(message.chat.id)
+    with db_session() as session:
+        tags = get_evidence_tags(session, chat_id)
+        if not tags:
+            bot.reply_to(message, "📭 Нет фактов для привязки. `/add_evidence`")
+            return
+        markup = types.InlineKeyboardMarkup()
+        for tag in tags:
+            btn = types.InlineKeyboardButton(text=f"📂 {tag}",
+                                             callback_data=f"link_cat:{tag}")
+            markup.add(btn)
+        bot.send_message(chat_id, "🔗 Шаг 1: Выберите категорию факта:",
+                         reply_markup=markup)
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('link_cat:'))
+def callback_link_cat(call):
+    tag = call.data.split(':', 1)[1]
+    chat_id = str(call.message.chat.id)
+    with db_session() as session:
+        items = get_evidence_by_tag(session, chat_id, tag)
+        markup = types.InlineKeyboardMarkup()
+        for item in items:
+            label = f"{item.exhibit_code} {item.description[:20]}..."
+            btn = types.InlineKeyboardButton(text=label,
+                                             callback_data=f"link_ev:{item.exhibit_code}")
+            markup.add(btn)
+        bot.edit_message_text(f"🔗 Шаг 2: Выберите факт из **{tag}**:", chat_id,
+                              call.message.message_id, reply_markup=markup,
+                              parse_mode="Markdown")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('link_ev:'))
+def callback_link_ev(call):
+    ev_code = call.data.split(':', 1)[1]
+    chat_id = str(call.message.chat.id)
+    with db_session() as session:
+        docs = get_all_documents(session, chat_id)
+        if not docs:
+            bot.answer_callback_query(call.id, "Нет документов!")
+            return
+        markup = types.InlineKeyboardMarkup()
+        for d in docs:
+            btn = types.InlineKeyboardButton(text=f"📄 {d.title}",
+                                             callback_data=f"do_link:{ev_code}:{d.id}")
+            markup.add(btn)
+        bot.edit_message_text(
+            f"🔗 Шаг 3: Какой документ подтверждает **{ev_code}**?", chat_id,
+            call.message.message_id, reply_markup=markup,
+            parse_mode="Markdown")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('do_link:'))
+def callback_do_link(call):
+    _, ev_code, doc_id_str = call.data.split(':')
+    with db_session() as session:
+        resp = cmd_link_evidence(session, str(call.message.chat.id), ev_code,
+                                 int(doc_id_str))
+        bot.answer_callback_query(call.id, "Готово!")
+        bot.edit_message_text(resp, call.message.chat.id,
+                              call.message.message_id, parse_mode="Markdown")
+
+
+# --- OTHER COMMANDS ---
+@bot.message_handler(commands=['status'])
+def handle_status(m):
+    with db_session() as s: bot.reply_to(m, cmd_case_status(s, str(m.chat.id)),
+                                         parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['cases'])
+def handle_cases(message):
+    with db_session() as session:
+        cases = get_all_cases(session)
+        markup = types.InlineKeyboardMarkup()
+        for c in cases:
+            markup.add(types.InlineKeyboardButton(text=f"📂 {c.name}",
+                                                  callback_data=f"set_case:{c.name}"))
+        bot.send_message(message.chat.id, "Выберите кейс:",
+                         reply_markup=markup)
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('set_case:'))
+def callback_set_case(call):
+    case_name = call.data.split(':', 1)[1]
+    with db_session() as session:
+        resp = set_active_case(session, str(call.message.chat.id), case_name)
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(f"✅ {resp}", call.message.chat.id,
+                              call.message.message_id, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['evidence'])
+def handle_evidence_view(message):
+    chat_id = str(message.chat.id)
+    with db_session() as session:
+        tags = get_evidence_tags(session, chat_id)
+        if not tags:
+            bot.reply_to(message, "📭 Нет фактов.")
+            return
+        markup = types.InlineKeyboardMarkup()
+        for tag in tags:
+            markup.add(types.InlineKeyboardButton(text=f"🏷 {tag}",
+                                                  callback_data=f"view_ev:{tag}"))
+        bot.send_message(chat_id, "Просмотр категорий:", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('view_ev:'))
+def callback_view_ev(call):
+    tag = call.data.split(':', 1)[1]
+    with db_session() as session:
+        items = get_evidence_by_tag(session, str(call.message.chat.id), tag)
+        lines = [f"🏷 **{tag}**", ""]
         for i, item in enumerate(items, 1):
             lines.append(f"{i}. {item.description}")
-            if i >= 15:  # Ограничим вывод, чтобы не спамить
-                lines.append(f"... и еще {len(items) - 15} фактов")
-                break
-
-        text_resp = "\n".join(lines)
-
-        # Редактируем сообщение, заменяя кнопки на текст (или можно отправить новым)
-        # Если текста слишком много, лучше отправить новым, но для кнопок удобно редактировать.
-        # Чтобы не терять меню, можно оставить кнопки, но Telegram не разрешает текст > 4096 в caption.
-        # Просто отредактируем.
-
-        bot.answer_callback_query(call.id, "Загружаю факты...")
-
-        # Добавим кнопку "Назад", чтобы вернуться к категориям
         markup = types.InlineKeyboardMarkup()
-        back_btn = types.InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="back_to_ev_tags")
-        markup.add(back_btn)
-
-        bot.edit_message_text(
-            text=text_resp,
-            chat_id=chat_id,
-            message_id=call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+        markup.add(types.InlineKeyboardButton("🔙 Назад",
+                                              callback_data="back_to_ev_tags"))
+        bot.edit_message_text("\n".join(lines), call.message.chat.id,
+                              call.message.message_id, reply_markup=markup,
+                              parse_mode="Markdown")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_ev_tags")
-def callback_back_to_evidence(call):
-    # Возвращаем меню категорий
-    chat_id = str(call.message.chat.id)
-    with db_session() as session:
-        tags = get_evidence_tags(session, chat_id)
-        markup = types.InlineKeyboardMarkup()
-        for tag in tags:
-            btn = types.InlineKeyboardButton(text=f"🏷 {tag}", callback_data=f"view_ev:{tag}")
-            markup.add(btn)
-
-        bot.edit_message_text(
-            text="Выберите категорию доказательств:",
-            chat_id=chat_id,
-            message_id=call.message.message_id,
-            reply_markup=markup
-        )
+def callback_back(call):
+    handle_evidence_view(call.message)
 
 
-# --- TEXT COMMANDS ---
-
+# --- RAG & DOCS ---
 @bot.message_handler(commands=['requirements'])
-def handle_requirements(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    with db_session() as session:
-        resp = cmd_requirements(session, str(message.chat.id))
-        bot.reply_to(message, resp, parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['fees'])
-def handle_fees(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    with db_session() as session:
-        resp = cmd_fees(session, str(message.chat.id))
-        bot.reply_to(message, resp, parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['filing'])
-def handle_filing(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    with db_session() as session:
-        resp = cmd_filing(session, str(message.chat.id))
-        bot.reply_to(message, resp, parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['premium'])
-def handle_premium(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    with db_session() as session:
-        resp = cmd_premium(session, str(message.chat.id))
-        bot.reply_to(message, resp, parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['case'])
-def handle_case_use_text(message):
-    text = message.text.strip()
-    prefix = "/case use "
-    if not text.startswith(prefix):
-        bot.reply_to(message, "Формат: `/case use <Name>`", parse_mode="Markdown")
-        return
-    case_name = text[len(prefix):].strip()
-    with db_session() as session:
-        resp = set_active_case(session, str(message.chat.id), case_name)
-        bot.reply_to(message, resp, parse_mode="Markdown")
+def h_req(m):
+    with db_session() as s: bot.reply_to(m,
+                                         cmd_requirements(s, str(m.chat.id)),
+                                         parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['docs'])
-def handle_list_docs(message):
-    with db_session() as session:
-        resp = cmd_list_documents(session, str(message.chat.id))
-        bot.reply_to(message, resp, parse_mode="Markdown")
+def h_docs(m):
+    with db_session() as s: bot.reply_to(m,
+                                         cmd_list_documents(s, str(m.chat.id)),
+                                         parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['doc'])
-def handle_doc_commands(message):
-    text = message.text.strip()
-    if text.startswith("/doc delete "):
-        title = text.replace("/doc delete ", "", 1).strip()
-        with db_session() as session:
-            resp = cmd_delete_document(session, str(message.chat.id), title)
-            bot.reply_to(message, resp, parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "Команда: `/doc delete <Title>`", parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['add_evidence'])
-def handle_add_evidence(message):
-    text = message.text.strip()
-    prefix = "/add_evidence "
-    if not text.startswith(prefix):
-        bot.reply_to(message, "Формат: `/add_evidence <Tag> <Text>`", parse_mode="Markdown")
-        return
-    content = text[len(prefix):].strip()
-    with db_session() as session:
-        resp = cmd_add_manual_evidence(session, str(message.chat.id), content)
-        bot.reply_to(message, resp, parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['review'])
-def handle_review(message):
-    text = message.text.strip()
-    prefix = "/review "
-    if not text.startswith(prefix):
-        bot.reply_to(message, "Формат: `/review <Doc Title>`", parse_mode="Markdown")
-        return
-    doc_title = text[len(prefix):].strip()
-    bot.reply_to(message, f"🔍 Анализирую документ '{doc_title}'...")
-    bot.send_chat_action(message.chat.id, 'typing')
-    try:
-        with db_session() as session:
-            resp = cmd_review_document(session, str(message.chat.id), doc_title)
-            if len(resp) > 4000:
-                for x in range(0, len(resp), 4000):
-                    bot.send_message(message.chat.id, resp[x:x + 4000], parse_mode="Markdown")
-            else:
-                bot.reply_to(message, resp, parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(message, f"Ошибка: {e}")
+def h_doc_del(m):
+    if "/doc delete" in m.text:
+        t = m.text.replace("/doc delete ", "").strip()
+        with db_session() as s: bot.reply_to(m, cmd_delete_document(s,
+                                                                    str(m.chat.id),
+                                                                    t),
+                                             parse_mode="Markdown")
 
 
 @bot.message_handler(content_types=['document'])
-def handle_files(message):
+def h_file(m):
     try:
-        chat_id = str(message.chat.id)
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        file_name = message.document.file_name
-        mime_type = message.document.mime_type or "application/octet-stream"
-
-        bot.reply_to(message, "📥 Принял файл. Сохраняю...")
-        with db_session() as session:
-            result_text = save_document_upload(session, chat_id, file_name, downloaded_file, mime_type)
-            bot.reply_to(message, result_text, parse_mode="Markdown")
+        fi = bot.get_file(m.document.file_id)
+        data = bot.download_file(fi.file_path)
+        with db_session() as s:
+            bot.reply_to(m, save_document_upload(s, str(m.chat.id),
+                                                 m.document.file_name, data,
+                                                 m.document.mime_type),
+                         parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(m, f"Error: {e}")
 
 
 if __name__ == "__main__":
@@ -295,5 +363,4 @@ if __name__ == "__main__":
         try:
             bot.infinity_polling(timeout=10, long_polling_timeout=5)
         except Exception as e:
-            print(f"Bot crashed: {e}")
-            time.sleep(5)
+            print(e); time.sleep(5)
