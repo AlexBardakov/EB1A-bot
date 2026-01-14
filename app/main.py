@@ -64,9 +64,10 @@ def get_main_menu_keyboard():
     markup.add(types.KeyboardButton("🏠 Главное меню"))
     return markup
 
+
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    """Главное меню и Центр управления."""
+    """Главное меню и Центр управления (Полная версия)."""
 
     # 1. Сбрасываем любые зависшие диалоги
     bot.clear_step_handler_by_chat_id(message.chat.id)
@@ -75,45 +76,79 @@ def send_welcome(message):
 
     text = (
         f"👋 **Привет, {user_name}! Я твой EB-1A Copilot.**\n"
-        "Я помогаю структурировать кейс, хранить доказательства и писать петицию.\n\n"
-        "📂 **УПРАВЛЕНИЕ КЕЙСОМ**\n"
-        "`/cases` — Выбрать или создать кейс\n"
-        "`/status` — Дашборд (прогресс, пробелы)\n"
-        "`/memo` — Стратегия (Role, Field, Pillars)\n"
-        "`/checkpoint` — Бэкапы и восстановление\n\n"
+        "Я помогаю вести кейс, управлять доказательствами и готовить петицию.\n\n"
 
-        "🗂 **ДОКАЗАТЕЛЬСТВА**\n"
-        "`/add_evidence` — Мастер добавления фактов\n"
-        "`/evidence` — Список всех фактов\n"
-        "`/export` — Скачать архив документов\n\n"
+        "📂 **КЕЙС И СТРАТЕГИЯ**\n"
+        "`/cases` — Выбрать или переключить кейс\n"
+        "`/memo` — Стратегия (Role, Pillars) и её правка\n"
+        "`/status` — Дашборд прогресса (Gap-анализ)\n"
+        "`/checkpoint` — Создать бэкап или восстановить данные\n\n"
 
-        "📄 **РАБОТА С ДОКУМЕНТАМИ**\n"
-        "Просто **перетащи файл** сюда, чтобы сохранить его.\n"
-        "`/review` — Дебаты AI по качеству документа\n\n"
+        "🧩 **ДОКАЗАТЕЛЬСТВА (FACTS)**\n"
+        "`/add_evidence` — Мастер добавления нового факта\n"
+        "`/evidence` — Просмотр и редактирование фактов\n"
+        "`/search <txt>` — Умный поиск по фактам\n"
+        "`/link` — Привязать документ к факту\n"
+        "`/delete_evidence` — Меню удаления фактов\n\n"
 
-        "✍️ **ГЕНЕРАЦИЯ (AI)**\n"
-        "`/draft` — Написать черновик раздела петиции"
+        "📄 **ДОКУМЕНТЫ И ФАЙЛЫ**\n"
+        "*Загрузка:* Просто перетащите файл (PDF/DOCX) в чат\n"
+        "`/docs` — Список всех файлов и версий\n"
+        "`/review <Name>` — AI-анализ документа (Debate)\n"
+        "`/export` — Скачать полный архив кейса (ZIP)\n"
+        "`/doc delete <Name>` — Удалить файл и отвязать его\n\n"
+
+        "✍️ **ГЕНЕРАЦИЯ (AI WRITER)**\n"
+        "`/draft` — Написать черновик раздела петиции\n\n"
+
+        "📚 **СПРАВОЧНИК USCIS (RAG)**\n"
+        "`/requirements` — Критерии EB-1A\n"
+        "`/fees` — Пошлины и калькулятор\n"
+        "`/filing` — Адреса подачи (Lockbox)\n"
+        "`/premium` — Premium Processing (I-907)\n\n"
+
+        "⚙️ **ПРОЧЕЕ**\n"
+        "`/cancel` — Отмена текущего действия"
     )
 
     # Инлайн-кнопки для самых частых действий
     markup = types.InlineKeyboardMarkup(row_width=2)
+
+    # Ряд 1: Главное состояние
     markup.add(
         types.InlineKeyboardButton("📊 Статус кейса",
                                    callback_data="case_status_click"),
-        # Нужно добавить обработчик, если нет
         types.InlineKeyboardButton("📂 Мои кейсы",
                                    callback_data="list_cases_click"),
-        # См. примечание ниже
     )
+
+    # Ряд 2: Работа с фактами
     markup.add(
         types.InlineKeyboardButton("➕ Добавить факт",
                                    callback_data="add_ev_menu"),
-        types.InlineKeyboardButton("✍️ Написать Draft",
-                                   callback_data="draft_run_menu_click")
-        # Алиас для вызова меню
+        types.InlineKeyboardButton("🗂 Все факты",
+                                   callback_data="view_ev:Awards")
+        # Сразу в популярную категорию
     )
 
-    # Отправляем сообщение + Включаем нижнюю кнопку "Главное меню"
+    # Ряд 3: Генерация и Документы
+    markup.add(
+        types.InlineKeyboardButton("✍️ Написать Draft",
+                                   callback_data="draft_run_menu_click"),
+        types.InlineKeyboardButton("📄 Список файлов",
+                                   callback_data="list_docs_click")
+        # Нужно добавить бридж
+    )
+
+    # Ряд 4: Справка (RAG)
+    markup.add(
+        types.InlineKeyboardButton("💰 Пошлины",
+                                   callback_data="rag_fees_click"),
+        types.InlineKeyboardButton("📬 Куда подавать",
+                                   callback_data="rag_filing_click")
+    )
+
+    # Отправляем сообщение
     bot.send_message(
         message.chat.id,
         text,
@@ -121,11 +156,10 @@ def send_welcome(message):
         parse_mode="Markdown"
     )
 
-    # Отдельно посылаем "пустышку", чтобы обновить нижнюю клавиатуру (ReplyKeyboard)
-    # Т.к. сообщение выше имеет InlineKeyboard, они не могут быть вместе в одном сообщении
+    # Обновляем нижнюю клавиатуру (Persistent Menu)
     bot.send_message(
         message.chat.id,
-        "🔽 Используйте меню ниже для навигации",
+        "🔽 Навигация",
         reply_markup=get_main_menu_keyboard()
     )
 
@@ -151,6 +185,29 @@ def handle_add_evidence_wizard(message):
     markup.add(*buttons)
     bot.send_message(message.chat.id, "🧩 Выберите категорию для нового факта:",
                      reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "list_docs_click")
+def bridge_list_docs(call):
+    call.message.text = "/docs"
+    h_docs(call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "rag_fees_click")
+def bridge_rag_fees(call):
+    call.message.text = "/fees"
+    # Для вызова функций rag нужен session. Создаем его.
+    with db_session() as s:
+        bot.send_message(call.message.chat.id, cmd_fees(s, str(call.message.chat.id)), parse_mode="Markdown")
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "rag_filing_click")
+def bridge_rag_filing(call):
+    call.message.text = "/filing"
+    with db_session() as s:
+        bot.send_message(call.message.chat.id, cmd_filing(s, str(call.message.chat.id)), parse_mode="Markdown")
+    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "list_cases_click")
