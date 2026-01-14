@@ -35,7 +35,10 @@ from app.telegram.commands import (
     get_or_create_chat_state,
     cmd_get_memo_data,
     cmd_update_memo_field,
-    cmd_search_evidence
+    cmd_search_evidence,
+    cmd_create_checkpoint,
+    get_checkpoints_list,
+    cmd_restore_checkpoint
 )
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
     cmd_premium
@@ -313,6 +316,100 @@ def handle_search_command(message):
             reply_markup=markup,
             parse_mode="Markdown"
         )
+
+# --- CHECKPOINTS INTERFACE ---
+
+@bot.message_handler(commands=['checkpoint'])
+def handle_checkpoint_main(message):
+    """
+    /checkpoint create <name>
+    /checkpoint list
+    """
+    args = message.text.split(maxsplit=2)
+    # args[0] = /checkpoint
+
+    if len(args) < 2:
+        help_text = (
+            "💾 **Управление Чекпоинтами (Бэкапы)**\n\n"
+            "`/checkpoint create <Название>` — Создать точку сохранения\n"
+            "`/checkpoint list` — Список и восстановление\n"
+        )
+        bot.reply_to(message, help_text, parse_mode="Markdown")
+        return
+
+    action = args[1].lower()
+    chat_id = str(message.chat.id)
+
+    with db_session() as session:
+        # CREATE
+        if action == "create":
+            if len(args) < 3:
+                bot.reply_to(message,
+                             "⚠️ Укажите название. Пример: `/checkpoint create До правок`",
+                             parse_mode="Markdown")
+                return
+            label = args[2].strip()
+            resp = cmd_create_checkpoint(session, chat_id, label)
+            bot.reply_to(message, resp, parse_mode="Markdown")
+
+        # LIST
+        elif action == "list":
+            cps = get_checkpoints_list(session, chat_id)
+            if not cps:
+                bot.reply_to(message, "📭 Чекпоинтов пока нет.")
+                return
+
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for cp in cps:
+                # Кнопка: "📅 Label (Дата)"
+                date_str = cp.created_at.strftime("%d.%m %H:%M")
+                btn_text = f"💾 {cp.label} ({date_str})"
+                # callback: restore_cp_ask:<ID>
+                markup.add(types.InlineKeyboardButton(btn_text,
+                                                      callback_data=f"restore_cp_ask:{cp.id}"))
+
+            bot.send_message(chat_id,
+                             "🕰 **Выберите чекпоинт для восстановления:**",
+                             reply_markup=markup, parse_mode="Markdown")
+
+        else:
+            bot.reply_to(message,
+                         "Неизвестная команда. Используйте create или list.")
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('restore_cp_ask:'))
+def callback_restore_ask(call):
+    """Спрашиваем подтверждение перед восстановлением."""
+    cp_id = call.data.split(':')[1]
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Да, восстановить",
+                                   callback_data=f"restore_cp_do:{cp_id}"),
+        types.InlineKeyboardButton("🚫 Отмена", callback_data="cancel_action")
+        # Используем уже существующую отмену
+    )
+
+    bot.edit_message_text(
+        "⚠️ **ВНИМАНИЕ!**\nВосстановление удалит все текущие факты и несохраненные изменения, сделанные после этого чекпоинта.\n\nВы уверены?",
+        call.message.chat.id, call.message.message_id, reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('restore_cp_do:'))
+def callback_restore_perform(call):
+    """Выполняем восстановление."""
+    cp_id = call.data.split(':')[1]
+    chat_id = str(call.message.chat.id)
+
+    with db_session() as session:
+        resp = cmd_restore_checkpoint(session, chat_id, int(cp_id))
+
+    bot.edit_message_text(resp, chat_id, call.message.message_id,
+                          parse_mode="Markdown")
 
 @bot.message_handler(commands=['status'])
 def handle_status(m):

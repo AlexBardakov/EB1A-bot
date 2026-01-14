@@ -1,6 +1,7 @@
 # app/telegram/commands.py
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -10,7 +11,7 @@ from app.core.orchestrator import run_debate
 from app.llm.openai_client import OpenAIClient
 from app.llm.gemini_client import GeminiClient
 from app.storage.models import ChatState, RunMode, Document, Case, \
-    EvidenceItem, EvidenceStatus
+    EvidenceItem, EvidenceStatus, Checkpoint
 
 # --- КОНСТАНТЫ ---
 STANDARD_CRITERIA: Dict[str, str] = {
@@ -405,3 +406,109 @@ def cmd_search_evidence(session: Session, chat_id: str, query_str: str) -> List[
         .all()
     )
     return items
+
+
+# --- CHECKPOINTS (БЭКАПЫ) ---
+
+def cmd_create_checkpoint(session: Session, chat_id: str, label: str) -> str:
+    """Создает снимок состояния кейса (Memo + Evidence)."""
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return "⚠️ Кейс не выбран."
+
+    # 1. Собираем данные
+    case = session.query(Case).filter(Case.id == cs.active_case_id).one()
+
+    # Сериализуем факты в список словарей
+    evidence_items = session.query(EvidenceItem).filter(
+        EvidenceItem.case_id == case.id).all()
+    evidence_dump = []
+    for item in evidence_items:
+        evidence_dump.append({
+            "exhibit_code": item.exhibit_code,
+            "title": item.title,
+            "description": item.description,
+            "criterion_tags": item.criterion_tags,
+            "strength": item.strength,
+            "status": item.status.value,  # Enum to string
+            "file_ids": item.file_ids
+        })
+
+    # Формируем полный снапшот
+    snapshot = {
+        "memo_json": case.memo_json,
+        "evidence_items": evidence_dump,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+    # 2. Сохраняем в БД
+    cp = Checkpoint(
+        case_id=case.id,
+        label=label,
+        snapshot_json=snapshot
+    )
+    session.add(cp)
+    session.commit()
+
+    return f"💾 Чекпоинт **'{label}'** успешно создан!"
+
+
+def get_checkpoints_list(session: Session, chat_id: str):
+    """Возвращает список чекпоинтов для кейса."""
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return []
+
+    return (
+        session.query(Checkpoint)
+        .filter(Checkpoint.case_id == cs.active_case_id)
+        .order_by(desc(Checkpoint.created_at))
+        .limit(10)
+        .all()
+    )
+
+
+def cmd_restore_checkpoint(session: Session, chat_id: str,
+                           checkpoint_id: int) -> str:
+    """Откатывает кейс к состоянию чекпоинта."""
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return "⚠️ Кейс не выбран."
+
+    cp = session.query(Checkpoint).filter(
+        Checkpoint.id == checkpoint_id).one_or_none()
+    if not cp:
+        return "❌ Чекпоинт не найден."
+
+    if cp.case_id != cs.active_case_id:
+        return "❌ Ошибка доступа: чекпоинт от другого кейса."
+
+    snap = cp.snapshot_json
+    case = session.query(Case).filter(Case.id == cs.active_case_id).one()
+
+    # 1. Восстанавливаем Memo
+    if "memo_json" in snap:
+        case.memo_json = snap["memo_json"]
+
+    # 2. Восстанавливаем Факты (Evidence)
+    # Сначала удаляем текущие
+    session.query(EvidenceItem).filter(
+        EvidenceItem.case_id == case.id).delete()
+
+    # Создаем заново из бэкапа
+    ev_data_list = snap.get("evidence_items", [])
+    for ev_data in ev_data_list:
+        new_item = EvidenceItem(
+            case_id=case.id,
+            exhibit_code=ev_data["exhibit_code"],
+            title=ev_data.get("title", ""),
+            description=ev_data["description"],
+            criterion_tags=ev_data["criterion_tags"],
+            strength=ev_data["strength"],
+            status=EvidenceStatus(ev_data["status"]),  # String to Enum
+            file_ids=ev_data["file_ids"]
+        )
+        session.add(new_item)
+
+    session.commit()
+    return f"♻️ Кейс успешно восстановлен к состоянию: **{cp.label}**"
