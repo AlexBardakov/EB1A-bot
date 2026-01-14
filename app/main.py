@@ -13,8 +13,10 @@ load_dotenv(os.path.join(root_dir, '.env'))
 if root_dir not in sys.path:
     sys.path.append(root_dir)
 
+
 from app.storage.db import db_session
 from app.storage.models import EvidenceItem, EvidenceStatus
+from app.core.drafter import generate_criterion_draft
 from app.telegram.commands import (
     set_active_case,
     cmd_review_document,
@@ -39,11 +41,12 @@ from app.telegram.commands import (
     cmd_create_checkpoint,
     get_checkpoints_list,
     cmd_restore_checkpoint,
-    cmd_export_case_archive
+    cmd_export_case_archive,
 )
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
     cmd_premium
 from app.core.ingest import save_document_upload
+from app.storage.models import Case
 
 from app.llm.gemini_client import GeminiClient
 
@@ -848,6 +851,78 @@ def h_file(m):
         # Ловим ошибки (например, если Gemini API Key не настроен)
         print(f"Error processing file: {e}")
         bot.reply_to(m, f"⚠️ Файл сохранен, но анализ не удался: {e}")
+
+
+# --- DRAFTING (ГЕНЕРАЦИЯ) ---
+
+@bot.message_handler(commands=['draft'])
+def handle_draft_menu(message):
+    """Меню выбора критерия для генерации."""
+    chat_id = str(message.chat.id)
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    # Используем стандартный список критериев из commands.py
+    for key, name in STANDARD_CRITERIA.items():
+        # key = 'awards', name = 'Prizes & Awards'
+        markup.add(types.InlineKeyboardButton(f"✍️ {name}",
+                                              callback_data=f"draft_run:{name}"))
+
+    bot.send_message(
+        chat_id,
+        "🏗 **Генератор черновиков (AI Drafter)**\n\n"
+        "Выберите критерий, для которого нужно написать аргументацию.\n"
+        "Бот соберет все факты из этой категории и напишет текст.",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('draft_run:'))
+def callback_run_draft(call):
+    criterion = call.data.split(':', 1)[1]
+    chat_id = str(call.message.chat.id)
+
+    # Визуальная обратная связь
+    bot.answer_callback_query(call.id, "Генерация началась, ждите...",
+                              show_alert=False)
+    msg = bot.send_message(chat_id,
+                           f"⏳ **Анализирую факты и пишу текст для '{criterion}'...**\nЭто займет около 30-60 секунд.")
+
+    # Запускаем генерацию
+    with db_session() as session:
+        cs = get_or_create_chat_state(session, chat_id)
+        if not cs.active_case_id:
+            bot.edit_message_text("⚠️ Сначала выберите кейс (/cases).",
+                                  chat_id, msg.message_id)
+            return
+
+        try:
+            draft_text = generate_criterion_draft(session, cs.active_case_id,
+                                                  criterion)
+
+            # Отправляем результат
+            # Разбиваем, если слишком длинный (Telegram лимит 4096)
+            if len(draft_text) > 4000:
+                parts = [draft_text[i:i + 4000] for i in
+                         range(0, len(draft_text), 4000)]
+                bot.edit_message_text(
+                    f"📝 **Черновик: {criterion} (Часть 1)**\n\n{parts[0]}",
+                    chat_id, msg.message_id, parse_mode="Markdown")
+                for p in parts[1:]:
+                    bot.send_message(chat_id, p, parse_mode="Markdown")
+            else:
+                bot.edit_message_text(
+                    f"📝 **Черновик: {criterion}**\n\n{draft_text}", chat_id,
+                    msg.message_id, parse_mode="Markdown")
+
+            bot.send_message(chat_id,
+                             "💡 *Совет: Скопируйте текст и отредактируйте его под свой стиль.*",
+                             parse_mode="Markdown")
+
+        except Exception as e:
+            bot.edit_message_text(f"❌ Ошибка генерации: {e}", chat_id,
+                                  msg.message_id)
 
 if __name__ == "__main__":
     while True:
