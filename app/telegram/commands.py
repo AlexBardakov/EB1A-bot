@@ -1,6 +1,10 @@
 # app/telegram/commands.py
 from __future__ import annotations
 
+import os
+import io
+import zipfile
+
 from datetime import datetime
 from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
@@ -512,3 +516,87 @@ def cmd_restore_checkpoint(session: Session, chat_id: str,
 
     session.commit()
     return f"♻️ Кейс успешно восстановлен к состоянию: **{cp.label}**"
+
+
+def cmd_export_case_archive(session: Session, chat_id: str):
+    """
+    Создает ZIP-архив, где файлы разложены по папкам категорий.
+    Включает только АКТИВНЫЕ версии документов.
+    """
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return None, "⚠️ Кейс не выбран."
+
+    case = session.query(Case).filter(Case.id == cs.active_case_id).one()
+
+    # 1. Собираем карту: Document ID -> Набор папок (тегов)
+    # По умолчанию документ нигде не лежит
+    doc_folders = {}  # {doc_id: set(["Awards", "Media"])}
+
+    evidence_items = session.query(EvidenceItem).filter(
+        EvidenceItem.case_id == case.id).all()
+
+    for item in evidence_items:
+        # Получаем теги факта (это и будут названия папок)
+        tags = item.criterion_tags or ["Others"]
+
+        # Получаем ID привязанных документов
+        linked_ids = item.file_ids or []
+
+        for doc_id in linked_ids:
+            if doc_id not in doc_folders:
+                doc_folders[doc_id] = set()
+            # Добавляем все теги факта к этому документу
+            for tag in tags:
+                doc_folders[doc_id].add(tag)
+
+    # 2. Получаем все документы кейса
+    documents = session.query(Document).filter(
+        Document.case_id == case.id).all()
+
+    if not documents:
+        return None, "📭 В кейсе нет документов для выгрузки."
+
+    # 3. Формируем ZIP в памяти
+    memory_file = io.BytesIO()
+
+    # Флаг, чтобы понять, добавили ли мы хоть что-то
+    files_added = 0
+
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for doc in documents:
+            # Пропускаем, если нет текущей версии (битая запись)
+            if not doc.current_version or not doc.current_version.storage_url:
+                continue
+
+            file_path = doc.current_version.storage_url
+
+            # Проверяем, существует ли файл физически
+            if not os.path.exists(file_path):
+                # Можно логировать ошибку, но пока просто пропустим
+                continue
+
+            # Определяем целевые папки
+            target_folders = doc_folders.get(doc.id, set())
+
+            if not target_folders:
+                target_folders.add("Others")
+
+            # Добавляем файл в каждую целевую папку архива
+            for folder in target_folders:
+                # Очищаем имя папки от спецсимволов (на всякий случай)
+                safe_folder = "".join(
+                    c for c in folder if c.isalnum() or c in " _-").strip()
+                archive_path = f"{safe_folder}/{doc.title}"
+
+                # Пишем файл
+                zf.write(file_path, arcname=archive_path)
+                files_added += 1
+
+    if files_added == 0:
+        return None, "⚠️ Файлы физически не найдены на диске (возможно, были удалены вручную)."
+
+    memory_file.seek(0)
+    filename = f"Case_Files_{case.name.replace(' ', '_')}.zip"
+
+    return memory_file, filename

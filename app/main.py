@@ -38,7 +38,8 @@ from app.telegram.commands import (
     cmd_search_evidence,
     cmd_create_checkpoint,
     get_checkpoints_list,
-    cmd_restore_checkpoint
+    cmd_restore_checkpoint,
+    cmd_export_case_archive
 )
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
     cmd_premium
@@ -769,6 +770,32 @@ def h_doc_del(m):
                                                                     t),
                                              parse_mode="Markdown")
 
+@bot.message_handler(commands=['export'])
+def handle_export(message):
+    """Экспорт полного архива документов кейса."""
+    chat_id = str(message.chat.id)
+
+    # Статус "отправка документа" (показывает пользователю, что бот думает)
+    bot.send_chat_action(chat_id, 'upload_document')
+
+    with db_session() as session:
+        file_stream, filename_or_error = cmd_export_case_archive(session,
+                                                                 chat_id)
+
+        if file_stream is None:
+            bot.reply_to(message, filename_or_error)
+            return
+
+        bot.send_document(
+            chat_id,
+            file_stream,
+            visible_file_name=filename_or_error,
+            caption=(
+                "📦 **Полный архив кейса**\n"
+                "Файлы разложены по папкам (категориям).\n"
+                "Включены только актуальные версии."
+            )
+        )
 
 @bot.message_handler(content_types=['document'])
 def h_file(m):
