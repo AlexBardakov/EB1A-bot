@@ -4,58 +4,60 @@ from __future__ import annotations
 import os
 from typing import Dict, Any, Optional
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+# НОВЫЙ ИМПОРТ
+from google import genai
+from google.genai import types
 
 from app.llm.base import LLMClient, LLMResult
-
 
 class GeminiClient(LLMClient):
     name = "gemini"
 
     def __init__(self, model_name: Optional[str] = None) -> None:
         """
-        model_name: Если указано, принудительно используем эту модель.
-                    Иначе берем из .env (GEMINI_MODEL).
-                    Иначе fallback на 'gemini-2.5-flash'.
+        Инициализация клиента Google Gen AI (v1.0+).
         """
         api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
+        if not api_key:
+            print("⚠️ WARNING: GEMINI_API_KEY is not set.")
+            return
 
-        # Приоритет: Аргумент -> ENV -> Default
-        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        # Создаем клиента (он теперь stateless, хранит только ключ)
+        self.client = genai.Client(api_key=api_key)
+
+        # Определяем модель (Flash для скорости, Pro для ума)
+        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
     def generate(
             self,
             *,
             system: str,
             user: str,
-            temperature: float = 0.2,
-            max_output_tokens: int = 1200,
+            temperature: float = 0.3,
+            max_output_tokens: int = 2000,
             timeout_s: int = 60,
             extra: Optional[Dict[str, Any]] = None,
     ) -> LLMResult:
         try:
-            # Создаем модель с системной инструкцией
-            model = genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=system
-            )
-
-            config = GenerationConfig(
+            # Конфигурация генерации
+            config = types.GenerateContentConfig(
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
+                system_instruction=system  # Системный промпт теперь здесь
             )
 
-            response = model.generate_content(
-                user,
-                generation_config=config,
+            # Вызов API
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=user,
+                config=config
             )
 
-            if not response.parts:
+            # В новом SDK .text может бросить ошибку, если ответ пустой/заблокирован
+            # Поэтому безопасно извлекаем текст
+            if not response.text:
                 return LLMResult(
-                    text="[Gemini Error] Ответ заблокирован фильтрами безопасности.",
+                    text="[Gemini Error] Ответ пуст или заблокирован фильтрами.",
                     meta={"error": True, "provider": self.name}
                 )
 
@@ -65,7 +67,6 @@ class GeminiClient(LLMClient):
             )
 
         except Exception as e:
-            # Если ошибка - выводим в лог, но не роняем бота
             print(f"[Gemini Error] {e}")
             return LLMResult(
                 text=f"[Gemini Error] {str(e)}",

@@ -59,29 +59,84 @@ bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 print("--- EB-1A Bot (Polling Mode) Started ---")
 
+def get_main_menu_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    markup.add(types.KeyboardButton("🏠 Главное меню"))
+    return markup
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    help_text = (
-        "🤖 **EB-1A Assistant Bot: Справка**\n\n"
-        "📊 **Дашборд**\n"
-        "`/status` - Gap-анализ кейса (прогресс)\n\n"
+    """Главное меню и Центр управления."""
 
-        "🧩 **Доказательства (Факты)**\n"
-        "`/add_evidence` - Добавить факт (Мастер)\n"
-        "`/delete_evidence` - Удалить факт (Меню)\n"
-        "`/evidence` - Просмотр фактов по тегам\n"
-        "`/link` - Привязать Документ к Факту\n\n"
+    # 1. Сбрасываем любые зависшие диалоги
+    bot.clear_step_handler_by_chat_id(message.chat.id)
 
-        "📁 **Файлы и Кейс**\n"
-        "`/cases` - Выбрать кейс\n"
-        "`/docs` - Список документов\n"
-        "*Загрузка:* Просто перетащите файл в чат."
+    user_name = message.from_user.first_name
+
+    text = (
+        f"👋 **Привет, {user_name}! Я твой EB-1A Copilot.**\n"
+        "Я помогаю структурировать кейс, хранить доказательства и писать петицию.\n\n"
+        "📂 **УПРАВЛЕНИЕ КЕЙСОМ**\n"
+        "`/cases` — Выбрать или создать кейс\n"
+        "`/status` — Дашборд (прогресс, пробелы)\n"
+        "`/memo` — Стратегия (Role, Field, Pillars)\n"
+        "`/checkpoint` — Бэкапы и восстановление\n\n"
+
+        "🗂 **ДОКАЗАТЕЛЬСТВА**\n"
+        "`/add_evidence` — Мастер добавления фактов\n"
+        "`/evidence` — Список всех фактов\n"
+        "`/export` — Скачать архив документов\n\n"
+
+        "📄 **РАБОТА С ДОКУМЕНТАМИ**\n"
+        "Просто **перетащи файл** сюда, чтобы сохранить его.\n"
+        "`/review` — Дебаты AI по качеству документа\n\n"
+
+        "✍️ **ГЕНЕРАЦИЯ (AI)**\n"
+        "`/draft` — Написать черновик раздела петиции"
     )
-    bot.reply_to(message, help_text, parse_mode="Markdown")
 
+    # Инлайн-кнопки для самых частых действий
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📊 Статус кейса",
+                                   callback_data="case_status_click"),
+        # Нужно добавить обработчик, если нет
+        types.InlineKeyboardButton("📂 Мои кейсы",
+                                   callback_data="list_cases_click"),
+        # См. примечание ниже
+    )
+    markup.add(
+        types.InlineKeyboardButton("➕ Добавить факт",
+                                   callback_data="add_ev_menu"),
+        types.InlineKeyboardButton("✍️ Написать Draft",
+                                   callback_data="draft_run_menu_click")
+        # Алиас для вызова меню
+    )
+
+    # Отправляем сообщение + Включаем нижнюю кнопку "Главное меню"
+    bot.send_message(
+        message.chat.id,
+        text,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+    # Отдельно посылаем "пустышку", чтобы обновить нижнюю клавиатуру (ReplyKeyboard)
+    # Т.к. сообщение выше имеет InlineKeyboard, они не могут быть вместе в одном сообщении
+    bot.send_message(
+        message.chat.id,
+        "🔽 Используйте меню ниже для навигации",
+        reply_markup=get_main_menu_keyboard()
+    )
 
 # --- ADD EVIDENCE WIZARD ---
+
+@bot.message_handler(func=lambda message: message.text == "🏠 Главное меню")
+def handle_global_menu_button(message):
+    """Возврат в начало из любого места."""
+    send_welcome(message)
+
+
 @bot.message_handler(commands=['add_evidence'])
 def handle_add_evidence_wizard(message):
     """Шаг 1: Показываем кнопки с категориями."""
@@ -96,6 +151,37 @@ def handle_add_evidence_wizard(message):
     markup.add(*buttons)
     bot.send_message(message.chat.id, "🧩 Выберите категорию для нового факта:",
                      reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "list_cases_click")
+def bridge_list_cases(call):
+    # Вызываем логику команды /cases
+    # Нам нужно эмулировать message из call
+    call.message.text = "/cases"
+    handle_cases_menu(call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "case_status_click")
+def bridge_case_status(call):
+    call.message.text = "/status"
+    handle_status(call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "add_ev_menu")
+def bridge_add_ev(call):
+    # Вызываем меню добавления (wizard)
+    # В commands.py это cmd_add_manual_evidence, но здесь нам нужен wizard start
+    # Если у вас есть handle_add_evidence_wizard(message) - вызывайте его.
+    # Если нет, просто отправим инструкцию:
+    bot.send_message(call.message.chat.id,
+                     "Напишите `/add_evidence` или выберите категорию в меню `/evidence`.")
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data == "draft_run_menu_click")
+def bridge_draft_menu(call):
+    call.message.text = "/draft"
+    handle_draft_menu(call.message)
 
 
 @bot.callback_query_handler(
@@ -151,6 +237,7 @@ def handle_delete_evidence_menu(message):
         bot.send_message(chat_id,
                          "Выберите категорию, из которой удалить факт:",
                          reply_markup=markup)
+
 
 @bot.callback_query_handler(
     func=lambda call: call.data.startswith('del_ev_tag:'))
