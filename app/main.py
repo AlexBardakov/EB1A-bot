@@ -215,7 +215,7 @@ def bridge_list_cases(call):
     # Вызываем логику команды /cases
     # Нам нужно эмулировать message из call
     call.message.text = "/cases"
-    handle_cases_menu(call.message)
+    handle_cases(call.message)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "case_status_click")
