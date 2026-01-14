@@ -386,3 +386,22 @@ def cmd_update_memo_field(session: Session, chat_id: str, key: str,
     session.commit()
 
     return f"✅ Поле **{key}** успешно обновлено!"
+
+def cmd_search_evidence(session: Session, chat_id: str, query_str: str) -> List[EvidenceItem]:
+    """Ищет факты по вхождению текста в description или exhibit_code."""
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return []
+
+    # Используем ILIKE для поиска без учета регистра
+    items = (
+        session.query(EvidenceItem)
+        .filter(
+            EvidenceItem.case_id == cs.active_case_id,
+            EvidenceItem.description.ilike(f"%{query_str}%")
+        )
+        .order_by(EvidenceItem.exhibit_code)
+        .limit(15) # Ограничиваем выдачу, чтобы не сломать интерфейс
+        .all()
+    )
+    return items

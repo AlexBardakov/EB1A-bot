@@ -34,7 +34,8 @@ from app.telegram.commands import (
     EvidenceStatus,
     get_or_create_chat_state,
     cmd_get_memo_data,
-    cmd_update_memo_field
+    cmd_update_memo_field,
+    cmd_search_evidence
 )
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
     cmd_premium
@@ -261,6 +262,58 @@ def callback_do_link(call):
 
 
 # --- OTHER COMMANDS ---
+# --- GLOBAL CANCEL ---
+@bot.message_handler(commands=['cancel'])
+def handle_cancel(message):
+    """Сбрасывает любое ожидание ввода (next_step_handler)."""
+    # Эта команда очищает "память" бота о том, что он ждет от вас текст
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    bot.send_message(message.chat.id,
+                     "🚫 Действие отменено. Бот готов к командам.",
+                     reply_markup=types.ReplyKeyboardRemove())
+
+
+# --- SMART SEARCH ---
+@bot.message_handler(commands=['search'])
+def handle_search_command(message):
+    """Ищет факты по запросу. Пример: /search конкурс"""
+    chat_id = str(message.chat.id)
+
+    # Парсим запрос: убираем саму команду /search
+    query = message.text.replace("/search", "").strip()
+
+    if not query or len(query) < 2:
+        bot.reply_to(message,
+                     "🔍 Введите запрос после команды. Пример: `/search награда`")
+        return
+
+    with db_session() as session:
+        items = cmd_search_evidence(session, chat_id, query)
+
+        if not items:
+            bot.reply_to(message,
+                         f"🤷‍♂️ По запросу '{query}' ничего не найдено.")
+            return
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for item in items:
+            # Используем ту же логику кнопок, что и в /evidence,
+            # чтобы сразу можно было перейти к редактированию
+            status_icon = "✅" if item.status == EvidenceStatus.verified else "📝"
+            short_desc = (item.description[:30] + '..') if len(
+                item.description) > 30 else item.description
+
+            btn_text = f"{status_icon} {item.exhibit_code} | {short_desc}"
+            markup.add(types.InlineKeyboardButton(btn_text,
+                                                  callback_data=f"open_ev:{item.exhibit_code}"))
+
+        bot.send_message(
+            chat_id,
+            f"🔍 **Результаты поиска по запросу '{query}':**",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
 @bot.message_handler(commands=['status'])
 def handle_status(m):
     with db_session() as s: bot.reply_to(m, cmd_case_status(s, str(m.chat.id)),
@@ -671,7 +724,6 @@ def h_file(m):
         # Ловим ошибки (например, если Gemini API Key не настроен)
         print(f"Error processing file: {e}")
         bot.reply_to(m, f"⚠️ Файл сохранен, но анализ не удался: {e}")
-
 
 if __name__ == "__main__":
     while True:
