@@ -13,13 +13,18 @@ from app.llm.base import LLMClient, LLMResult
 class GeminiClient(LLMClient):
     name = "gemini"
 
-    def __init__(self) -> None:
+    def __init__(self, model_name: Optional[str] = None) -> None:
+        """
+        model_name: Если указано, принудительно используем эту модель.
+                    Иначе берем из .env (GEMINI_MODEL).
+                    Иначе fallback на 'gemini-2.5-flash'.
+        """
         api_key = os.getenv("GEMINI_API_KEY")
         if api_key:
             genai.configure(api_key=api_key)
 
-        # Рекомендуемая модель сейчас - gemini-1.5-flash (быстрая/дешевая) или gemini-1.5-pro (умная)
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        # Приоритет: Аргумент -> ENV -> Default
+        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     def generate(
             self,
@@ -32,7 +37,7 @@ class GeminiClient(LLMClient):
             extra: Optional[Dict[str, Any]] = None,
     ) -> LLMResult:
         try:
-            # Gemini поддерживает system_instruction при создании объекта модели
+            # Создаем модель с системной инструкцией
             model = genai.GenerativeModel(
                 model_name=self.model_name,
                 system_instruction=system
@@ -43,17 +48,14 @@ class GeminiClient(LLMClient):
                 max_output_tokens=max_output_tokens,
             )
 
-            # Вызов генерации
             response = model.generate_content(
                 user,
                 generation_config=config,
-                # request_options={"timeout": timeout_s} # можно добавить если нужно жесткое ограничение
             )
 
-            # Gemini может блокировать ответ по безопасности, проверяем
             if not response.parts:
                 return LLMResult(
-                    text="[Gemini Error] Response was blocked by safety filters or empty.",
+                    text="[Gemini Error] Ответ заблокирован фильтрами безопасности.",
                     meta={"error": True, "provider": self.name}
                 )
 
@@ -63,6 +65,8 @@ class GeminiClient(LLMClient):
             )
 
         except Exception as e:
+            # Если ошибка - выводим в лог, но не роняем бота
+            print(f"[Gemini Error] {e}")
             return LLMResult(
                 text=f"[Gemini Error] {str(e)}",
                 meta={"error": True, "provider": self.name}

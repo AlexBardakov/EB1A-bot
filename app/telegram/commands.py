@@ -308,7 +308,8 @@ def cmd_review_document(session: Session, chat_id: str,
     ctx = build_context_pack(session, cs.active_case_id, document_id=doc.id,
                              include_document_text=True)
     llm_a = OpenAIClient()
-    llm_b = GeminiClient()
+    llm_b = GeminiClient(model_name="gemini-2.5-pro")
+
     task = "Review the provided document for EB-1A strength and weaknesses."
     result = run_debate(session, ctx=ctx, mode=RunMode.review, user_task=task,
                         llm_a=llm_a, llm_b=llm_b, judge=llm_a)

@@ -553,7 +553,7 @@ def h_file(m):
                 # Показываем статус "печатает...", чтобы пользователь видел процесс
                 bot.send_chat_action(m.chat.id, 'typing')
 
-                gemini = GeminiClient()
+                gemini = GeminiClient(model_name="gemini-2.5-flash")
 
                 # Промпт для быстрой проверки
                 prompt = (
