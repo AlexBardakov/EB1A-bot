@@ -313,3 +313,38 @@ def cmd_review_document(session: Session, chat_id: str,
     result = run_debate(session, ctx=ctx, mode=RunMode.review, user_task=task,
                         llm_a=llm_a, llm_b=llm_b, judge=llm_a)
     return f"Run #{result.run_id}\n\n{result.judge_output}"
+
+
+def update_evidence(session: Session, chat_id: str, ev_code: str,
+                    **kwargs) -> str:
+    """Обновляет поля факта: description, strength, status."""
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return "⚠️ Кейс не выбран."
+
+    item = session.query(EvidenceItem).filter(
+        EvidenceItem.case_id == cs.active_case_id,
+        EvidenceItem.exhibit_code == ev_code
+    ).one_or_none()
+
+    if not item:
+        return f"❌ Факт `{ev_code}` не найден."
+
+    # Обновляем поля, если они переданы
+    if "description" in kwargs:
+        item.description = kwargs["description"]
+
+    if "strength" in kwargs:
+        # Валидация 1..5
+        val = int(kwargs["strength"])
+        item.strength = max(1, min(5, val))
+
+    if "status" in kwargs:
+        # Ожидаем string: 'draft', 'verified', 'archived'
+        new_status = kwargs["status"]
+        # Можно добавить проверку на Enum, но SQLAlchemy сам ругнется если что
+        item.status = EvidenceStatus(new_status)
+
+    session.commit()
+    # Возвращаем обновленный объект (или строку, но лучше строку для UI)
+    return f"✅ Факт `{ev_code}` успешно обновлен."

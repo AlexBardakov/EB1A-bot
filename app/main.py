@@ -14,6 +14,7 @@ if root_dir not in sys.path:
     sys.path.append(root_dir)
 
 from app.storage.db import db_session
+from app.storage.models import EvidenceItem, EvidenceStatus
 from app.telegram.commands import (
     set_active_case,
     cmd_review_document,
@@ -27,8 +28,11 @@ from app.telegram.commands import (
     cmd_case_status,
     get_all_documents,
     cmd_link_evidence,
-    STANDARD_CRITERIA,  # <--- НОВЫЙ ИМПОРТ
-    cmd_delete_evidence_by_code  # <--- НОВЫЙ ИМПОРТ
+    STANDARD_CRITERIA,
+    cmd_delete_evidence_by_code,
+    update_evidence,
+    EvidenceStatus,
+    get_or_create_chat_state
 )
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
     cmd_premium
@@ -300,18 +304,197 @@ def handle_evidence_view(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_ev:'))
 def callback_view_ev(call):
+    """Показывает список фактов в категории в виде КНОПОК."""
     tag = call.data.split(':', 1)[1]
+    chat_id = str(call.message.chat.id)
+
     with db_session() as session:
-        items = get_evidence_by_tag(session, str(call.message.chat.id), tag)
-        lines = [f"🏷 **{tag}**", ""]
-        for i, item in enumerate(items, 1):
-            lines.append(f"{i}. {item.description}")
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Назад",
+        items = get_evidence_by_tag(session, chat_id, tag)
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        if not items:
+            bot.answer_callback_query(call.id, "В этой категории пока пусто.")
+            # Можно сразу предложить добавить
+            # markup.add(types.InlineKeyboardButton("➕ Добавить", callback_data=f"add_ev_cat:{tag}"))
+
+        for item in items:
+            # Кнопка для каждого факта: "MAN-1: Текст..."
+            # Обрезаем текст, чтобы влез в кнопку
+            short_desc = (item.description[:30] + '..') if len(
+                item.description) > 30 else item.description
+            status_icon = "✅" if item.status == EvidenceStatus.verified else "📝"
+            btn_text = f"{status_icon} {item.exhibit_code} | {short_desc}"
+
+            # callback: open_ev:<CODE>
+            markup.add(types.InlineKeyboardButton(btn_text,
+                                                  callback_data=f"open_ev:{item.exhibit_code}"))
+
+        markup.add(types.InlineKeyboardButton("🔙 Назад к категориям",
                                               callback_data="back_to_ev_tags"))
-        bot.edit_message_text("\n".join(lines), call.message.chat.id,
-                              call.message.message_id, reply_markup=markup,
-                              parse_mode="Markdown")
+
+        bot.edit_message_text(
+            f"📂 Категория: **{tag}**\nВыберите факт для редактирования:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
+
+# --- ДЕТАЛЬНЫЙ ПРОСМОТР И РЕДАКТОР ---
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('open_ev:'))
+def callback_open_evidence(call):
+    """Карточка факта с кнопками управления."""
+    ev_code = call.data.split(':', 1)[1]
+    chat_id = str(call.message.chat.id)
+
+    with db_session() as session:
+        # Ищем факт вручную или через helper (лучше напрямую для гибкости UI)
+        cs = get_or_create_chat_state(session, chat_id)
+        item = session.query(EvidenceItem).filter(
+            EvidenceItem.case_id == cs.active_case_id,
+            EvidenceItem.exhibit_code == ev_code
+        ).one_or_none()
+
+        if not item:
+            bot.answer_callback_query(call.id,
+                                      "Факт не найден (возможно, удален).")
+            return
+
+        # Формируем красивую карточку
+        status_str = "VERIFIED (Готово)" if item.status == EvidenceStatus.verified else "DRAFT (Черновик)"
+        # Визуализация силы: 1=🔴, 3=🟡, 5=🟢
+        strength_icon = "🔴" if item.strength < 3 else (
+            "🟡" if item.strength < 5 else "🟢")
+
+        text = (
+            f"🧾 **Факт: {item.exhibit_code}**\n"
+            f"🏷 Теги: {', '.join(item.criterion_tags)}\n"
+            f"➖➖➖➖➖➖\n"
+            f"{item.description}\n"
+            f"➖➖➖➖➖➖\n"
+            f"📊 Сила: {strength_icon} **{item.strength}/5**\n"
+            f"📌 Статус: **{status_str}**\n"
+            f"📎 Документов привязано: {len(item.file_ids)}"
+        )
+
+        # Кнопки управления
+        markup = types.InlineKeyboardMarkup(row_width=2)
+
+        # Ряд 1: Редактировать текст
+        markup.add(types.InlineKeyboardButton("✏️ Изменить текст",
+                                              callback_data=f"edit_ev_txt:{ev_code}"))
+
+        # Ряд 2: Сила и Статус
+        btn_strength = types.InlineKeyboardButton(f"⭐ Сила ({item.strength})",
+                                                  callback_data=f"set_ev_str_m:{ev_code}")
+
+        # Логика переключения статуса одной кнопкой
+        next_status = "verified" if item.status == EvidenceStatus.draft else "draft"
+        btn_status_label = "✅ В Готово" if item.status == EvidenceStatus.draft else "📝 В Черновик"
+        btn_status = types.InlineKeyboardButton(btn_status_label,
+                                                callback_data=f"set_ev_stat:{ev_code}:{next_status}")
+
+        markup.add(btn_strength, btn_status)
+
+        # Ряд 3: Назад (нужно знать категорию, чтобы вернуться правильно.
+        # Упростим: вернемся в корень evidence view)
+        # Берем первый тег для возврата
+        main_tag = item.criterion_tags[0] if item.criterion_tags else "Other"
+        markup.add(types.InlineKeyboardButton("🔙 Назад к списку",
+                                              callback_data=f"view_ev:{main_tag}"))
+
+        bot.edit_message_text(text, chat_id, call.message.message_id,
+                              reply_markup=markup, parse_mode="Markdown")
+
+
+# --- ЛОГИКА ИЗМЕНЕНИЯ ТЕКСТА ---
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('edit_ev_txt:'))
+def callback_edit_text_start(call):
+    ev_code = call.data.split(':', 1)[1]
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"✍️ Введите новое описание для факта **{ev_code}**:\n(Отправьте текст в ответ на это сообщение)"
+    )
+    bot.register_next_step_handler(msg, process_edit_text_finish, ev_code,
+                                   call.message.message_id)
+
+
+def process_edit_text_finish(message, ev_code, original_msg_id):
+    chat_id = str(message.chat.id)
+    new_text = message.text.strip()
+
+    if not new_text:
+        bot.send_message(chat_id, "❌ Текст не может быть пустым.")
+        return
+
+    with db_session() as session:
+        update_evidence(session, chat_id, ev_code, description=new_text)
+        # Удаляем сообщение пользователя и промпт бота для чистоты (опционально)
+        # bot.delete_message(chat_id, message.message_id)
+
+        bot.send_message(chat_id, f"✅ Описание факта {ev_code} обновлено!")
+
+        # Можно попробовать обновить карточку, но проще отправить пользователя смотреть заново,
+        # так как message_id изменился.
+        # Или можно вызвать callback_open_evidence вручную, но это сложнее из step_handler.
+
+
+# --- ЛОГИКА ИЗМЕНЕНИЯ СИЛЫ ---
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('set_ev_str_m:'))
+def callback_strength_menu(call):
+    """Меню выбора оценки 1-5."""
+    ev_code = call.data.split(':', 1)[1]
+    markup = types.InlineKeyboardMarkup(row_width=5)
+    btns = []
+    for i in range(1, 6):
+        btns.append(types.InlineKeyboardButton(str(i),
+                                               callback_data=f"set_ev_str_v:{ev_code}:{i}"))
+    markup.add(*btns)
+    markup.add(types.InlineKeyboardButton("🔙 Отмена",
+                                          callback_data=f"open_ev:{ev_code}"))
+
+    bot.edit_message_text(
+        f"📊 Оцените силу факта **{ev_code}** (1 - слабо, 5 - железобетонно):",
+        call.message.chat.id, call.message.message_id, reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('set_ev_str_v:'))
+def callback_strength_set(call):
+    _, ev_code, val_str = call.data.split(':')
+    chat_id = str(call.message.chat.id)
+
+    with db_session() as session:
+        update_evidence(session, chat_id, ev_code, strength=val_str)
+
+    # Возвращаемся в карточку (эмулируем клик "Назад")
+    # Трюк: подменяем data, чтобы callback_open_evidence сработал
+    call.data = f"open_ev:{ev_code}"
+    callback_open_evidence(call)
+
+
+# --- ЛОГИКА ИЗМЕНЕНИЯ СТАТУСА ---
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('set_ev_stat:'))
+def callback_status_set(call):
+    _, ev_code, new_status = call.data.split(':')
+    chat_id = str(call.message.chat.id)
+
+    with db_session() as session:
+        update_evidence(session, chat_id, ev_code, status=new_status)
+
+    # Возвращаемся в карточку
+    call.data = f"open_ev:{ev_code}"
+    callback_open_evidence(call)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_ev_tags")
