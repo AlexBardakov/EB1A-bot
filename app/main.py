@@ -32,7 +32,9 @@ from app.telegram.commands import (
     cmd_delete_evidence_by_code,
     update_evidence,
     EvidenceStatus,
-    get_or_create_chat_state
+    get_or_create_chat_state,
+    cmd_get_memo_data,
+    cmd_update_memo_field
 )
 from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
     cmd_premium
@@ -141,7 +143,6 @@ def handle_delete_evidence_menu(message):
         bot.send_message(chat_id,
                          "Выберите категорию, из которой удалить факт:",
                          reply_markup=markup)
-
 
 @bot.callback_query_handler(
     func=lambda call: call.data.startswith('del_ev_tag:'))
@@ -503,6 +504,96 @@ def callback_status_set(call):
 def callback_back(call):
     handle_evidence_view(call.message)
 
+
+@bot.message_handler(commands=['memo'])
+def handle_memo_view(message):
+    """Показывает текущее Memo и кнопки редактирования."""
+    chat_id = str(message.chat.id)
+    with db_session() as session:
+        memo, case_name_or_err = cmd_get_memo_data(session, chat_id)
+
+        if not memo and isinstance(case_name_or_err, str):
+            # Это ошибка (кейс не выбран)
+            bot.reply_to(message, case_name_or_err)
+            return
+
+        # Формируем красивый текст
+        role = memo.get("role", "—")
+        field = memo.get("field", "—")
+        strategy = memo.get("strategy", "—")
+
+        pillars_list = memo.get("pillars", [])
+        if isinstance(pillars_list, list):
+            pillars_str = "\n".join([f"  🔸 {p}" for p in pillars_list])
+        else:
+            pillars_str = str(pillars_list)
+
+        text = (
+            f"📑 **Стратегия кейса: {case_name_or_err}**\n\n"
+            f"👤 **Role (Роль):**\n{role}\n\n"
+            f"🏗 **Field (Область):**\n{field}\n\n"
+            f"🏛 **Pillars (Опоры):**\n{pillars_str}\n\n"
+            f"🎯 **Strategy (Стратегия):**\n{strategy}"
+        )
+
+        # Кнопки для редактирования
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✏️ Изм. Role",
+                                       callback_data="edit_memo:role"),
+            types.InlineKeyboardButton("✏️ Изм. Field",
+                                       callback_data="edit_memo:field"),
+            types.InlineKeyboardButton("✏️ Изм. Pillars",
+                                       callback_data="edit_memo:pillars"),
+            types.InlineKeyboardButton("✏️ Изм. Strategy",
+                                       callback_data="edit_memo:strategy")
+        )
+        markup.add(types.InlineKeyboardButton("🔄 Обновить вид",
+                                              callback_data="refresh_memo"))
+
+        bot.send_message(chat_id, text, reply_markup=markup,
+                         parse_mode="Markdown")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "refresh_memo")
+def callback_refresh_memo(call):
+    # Просто перезагружаем сообщение (удаляем старое, шлем новое, или редактируем)
+    # Для простоты вызовем handle_memo_view, но нужно передать message.
+    # Проще просто удалить и вызвать заново логику редактирования.
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    handle_memo_view(call.message)
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith('edit_memo:'))
+def callback_edit_memo_start(call):
+    key = call.data.split(':')[1]
+
+    tips = ""
+    if key == "pillars":
+        tips = "\n(Каждый пункт с новой строки)"
+
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"✍️ Введите новое значение для **{key}**{tips}:\n(Отправьте текст в ответ на это сообщение)"
+    )
+    bot.register_next_step_handler(msg, process_memo_update, key)
+
+
+def process_memo_update(message, key):
+    chat_id = str(message.chat.id)
+    new_text = message.text.strip()
+
+    if not new_text:
+        bot.send_message(chat_id, "❌ Пустой ввод. Отмена.")
+        return
+
+    with db_session() as session:
+        resp = cmd_update_memo_field(session, chat_id, key, new_text)
+        bot.send_message(chat_id, resp, parse_mode="Markdown")
+
+        # Показываем обновленное Memo
+        handle_memo_view(message)
 
 # --- RAG & DOCS ---
 @bot.message_handler(commands=['requirements'])

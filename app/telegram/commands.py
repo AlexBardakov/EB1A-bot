@@ -349,3 +349,40 @@ def update_evidence(session: Session, chat_id: str, ev_code: str,
     session.commit()
     # Возвращаем обновленный объект (или строку, но лучше строку для UI)
     return f"✅ Факт `{ev_code}` успешно обновлен."
+
+
+def cmd_get_memo_data(session: Session, chat_id: str):
+    """Возвращает данные memo для отображения."""
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return None, "⚠️ Кейс не выбран."
+
+    case = session.query(Case).filter(Case.id == cs.active_case_id).one()
+    return case.memo_json, case.name
+
+
+def cmd_update_memo_field(session: Session, chat_id: str, key: str,
+                          value_text: str) -> str:
+    """Обновляет конкретное поле в JSON memo."""
+    cs = get_or_create_chat_state(session, chat_id)
+    if not cs.active_case_id:
+        return "⚠️ Кейс не выбран."
+
+    case = session.query(Case).filter(Case.id == cs.active_case_id).one()
+
+    # Копируем текущий dict, чтобы SQLAlchemy увидел изменение
+    new_memo = dict(case.memo_json)
+
+    # Обработка списков (например, pillars)
+    if key == "pillars":
+        # Разбиваем текст по строкам
+        lines = [line.strip() for line in value_text.split('\n') if
+                 line.strip()]
+        new_memo[key] = lines
+    else:
+        new_memo[key] = value_text.strip()
+
+    case.memo_json = new_memo
+    session.commit()
+
+    return f"✅ Поле **{key}** успешно обновлено!"
