@@ -38,6 +38,8 @@ from app.telegram.commands_rag import cmd_requirements, cmd_fees, cmd_filing, \
     cmd_premium
 from app.core.ingest import save_document_upload
 
+from app.llm.gemini_client import GeminiClient
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     print("Error: TELEGRAM_BOT_TOKEN not found in .env")
@@ -532,13 +534,52 @@ def h_file(m):
     try:
         fi = bot.get_file(m.document.file_id)
         data = bot.download_file(fi.file_path)
+
         with db_session() as s:
-            bot.reply_to(m, save_document_upload(s, str(m.chat.id),
-                                                 m.document.file_name, data,
-                                                 m.document.mime_type),
-                         parse_mode="Markdown")
+            # 1. Сохраняем файл и получаем текст (распаковываем кортеж)
+            msg, extracted_text = save_document_upload(
+                s,
+                str(m.chat.id),
+                m.document.file_name,
+                data,
+                m.document.mime_type
+            )
+
+            # Отправляем техническое сообщение ("Файл сохранен...")
+            bot.reply_to(m, msg, parse_mode="Markdown")
+
+            # 2. Если текст есть, просим Gemini сделать "Паспорт документа"
+            if extracted_text and len(extracted_text) > 50:
+                # Показываем статус "печатает...", чтобы пользователь видел процесс
+                bot.send_chat_action(m.chat.id, 'typing')
+
+                gemini = GeminiClient()
+
+                # Промпт для быстрой проверки
+                prompt = (
+                    f"Проанализируй этот текст из загруженного файла. "
+                    f"Твоя задача — составить краткий 'Паспорт документа' на русском языке (2-3 предложения):\n"
+                    f"1. Что это за документ? (Рекомендательное письмо, Статья, Резюме, Награда и т.д.)\n"
+                    f"2. О чем он вкратце? (Кто, за что, какие даты)\n"
+                    f"3. Если текст похож на бессвязный мусор (ошибки кодировки), напиши: '⚠️ ОШИБКА РАСПОЗНАВАНИЯ'.\n\n"
+                    f"=== ТЕКСТ ДОКУМЕНТА (Начало) ===\n"
+                    f"{extracted_text[:15000]}"
+                # Ограничиваем длину на случай книг
+                )
+
+                res = gemini.generate(
+                    system="Ты помощник юриста EB-1A. Будь краток и точен.",
+                    user=prompt,
+                    temperature=0.1
+                )
+
+                bot.reply_to(m, f"🕵️‍♂️ **Gemini Scan:**\n\n{res.text}",
+                             parse_mode="Markdown")
+
     except Exception as e:
-        bot.reply_to(m, f"Error: {e}")
+        # Ловим ошибки (например, если Gemini API Key не настроен)
+        print(f"Error processing file: {e}")
+        bot.reply_to(m, f"⚠️ Файл сохранен, но анализ не удался: {e}")
 
 
 if __name__ == "__main__":

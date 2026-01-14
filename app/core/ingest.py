@@ -1,6 +1,7 @@
 # app/core/ingest.py
 import os
 from datetime import datetime
+from typing import Tuple
 
 # Библиотеки для текста
 import docx
@@ -45,7 +46,7 @@ def save_document_upload(
         file_name: str,
         file_data: bytes,
         mime_type: str
-) -> str:
+) -> Tuple[str, str]:
     """
     Сохраняет файл, парсит текст, создает/обновляет запись в БД.
     """
@@ -107,8 +108,10 @@ def save_document_upload(
     doc.current_version_id = version.id
     doc.updated_at = datetime.utcnow()
 
-    return (
+    user_message = (
         f"{msg_prefix}\n"
         f"Символов распознано: {len(extracted_text)}\n"
         f"Теперь можно проверить: `/review {file_name}`"
     )
+
+    return user_message, extracted_text
